@@ -1,7 +1,8 @@
 import sys
 import argparse
+from typing import Optional, Dict, Any
 from trading_bot.orders import OrderExecutor
-from trading_bot.validation import ValidationError
+from trading_bot.validation import ValidationError, InputValidator
 from trading_bot.api_client import APIError, BinanceFuturesClient
 from trading_bot.logging_config import get_logger
 from trading_bot.config import ENVIRONMENT
@@ -13,6 +14,7 @@ class TradingBotCLI:
     """
     CLI interface for trading bot.
     Manages argument parsing and command execution.
+    Supports both traditional command-line arguments and interactive mode.
     """
 
     def __init__(self):
@@ -47,6 +49,9 @@ class TradingBotCLI:
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="""
 Examples:
+  # Interactive order mode (guided prompts)
+  python -m trading_bot place-order-interactive
+  
   # Check connection and account info
   python -m trading_bot health-check
   
@@ -79,26 +84,31 @@ Examples:
         order_parser = subparsers.add_parser(
             'place-order', help='Place a new order')
         order_parser.add_argument(
+            '--interactive',
+            action='store_true',
+            help='Use interactive guided mode with prompts (optional arguments)'
+        )
+        order_parser.add_argument(
             '--symbol',
-            required=True,
+            required=False,
             help='Trading pair symbol (e.g., BTCUSDT, ETHUSDT)'
         )
         order_parser.add_argument(
             '--side',
-            required=True,
+            required=False,
             choices=['BUY', 'SELL'],
             help='Order side: BUY or SELL'
         )
         order_parser.add_argument(
             '--type',
             dest='order_type',
-            required=True,
+            required=False,
             choices=['MARKET', 'LIMIT'],
             help='Order type: MARKET or LIMIT'
         )
         order_parser.add_argument(
             '--quantity',
-            required=True,
+            required=False,
             help='Order quantity (positive number)'
         )
         order_parser.add_argument(
@@ -187,26 +197,17 @@ Examples:
 
     def _execute_order(self, args):
         """
-        Execute order based on CLI arguments.
+        Execute order either through traditional arguments or interactive mode.
 
         Args:
             args: Parsed command-line arguments
         """
-        logger.info(
-            f"Executing order: symbol={args.symbol}, side={args.side}, "
-            f"type={args.order_type}, qty={args.quantity}, price={args.price}"
-        )
-
         try:
-            result = self.executor.execute_order(
-                symbol=args.symbol,
-                side=args.side,
-                order_type=args.order_type,
-                quantity=args.quantity,
-                price=args.price
-            )
-
-            sys.exit(0)
+            # Check if interactive mode is enabled
+            if getattr(args, 'interactive', False):
+                self._execute_order_interactive_mode(args)
+            else:
+                self._execute_order_traditional_mode(args)
 
         except ValidationError as e:
             error_msg = f"❌ Validation Error: {str(e)}"
@@ -225,6 +226,296 @@ Examples:
             print(f"\n{error_msg}\n")
             logger.error(f"Unexpected error: {str(e)}", exc_info=True)
             sys.exit(1)
+
+    def _execute_order_traditional_mode(self, args):
+        """
+        Execute order using traditional command-line arguments.
+
+        Args:
+            args: Parsed command-line arguments
+        """
+        # Validate that all required arguments are provided
+        if not args.symbol or not args.side or not args.order_type or not args.quantity:
+            print(
+                "\n❌ Error: --symbol, --side, --type, and --quantity are required for traditional mode\n")
+            print("Use --interactive flag for guided mode:")
+            print("  python -m trading_bot place-order --interactive\n")
+            logger.error("Missing required arguments in traditional mode")
+            sys.exit(1)
+
+        logger.info(
+            f"Executing order: symbol={args.symbol}, side={args.side}, "
+            f"type={args.order_type}, qty={args.quantity}, price={args.price}"
+        )
+
+        result = self.executor.execute_order(
+            symbol=args.symbol,
+            side=args.side,
+            order_type=args.order_type,
+            quantity=args.quantity,
+            price=args.price
+        )
+
+        sys.exit(0)
+
+    def _execute_order_interactive_mode(self, args):
+        """
+        Execute order using interactive guided mode with prompts and confirmation.
+
+        Args:
+            args: Parsed command-line arguments
+        """
+        logger.info("Starting interactive order mode")
+
+        # Gather order details through interactive prompts
+        order_params = self._prompt_for_order_details()
+
+        # Validate inputs using existing validation layer
+        InputValidator.validate_all(
+            symbol=order_params['symbol'],
+            side=order_params['side'],
+            order_type=order_params['order_type'],
+            quantity=order_params['quantity'],
+            price=order_params['price']
+        )
+
+        # Display order summary for confirmation
+        self._display_order_summary(order_params)
+
+        # Ask for confirmation before execution
+        if not self._confirm_order_execution():
+            print("\n⚠️  Order cancelled by user.\n")
+            logger.info("Order cancelled at user confirmation step")
+            sys.exit(0)
+
+        # Execute the order using existing order executor
+        logger.info(
+            f"Executing interactive order: symbol={order_params['symbol']}, "
+            f"side={order_params['side']}, type={order_params['order_type']}, "
+            f"qty={order_params['quantity']}, price={order_params['price']}"
+        )
+
+        result = self.executor.execute_order(
+            symbol=order_params['symbol'],
+            side=order_params['side'],
+            order_type=order_params['order_type'],
+            quantity=order_params['quantity'],
+            price=order_params['price']
+        )
+
+        sys.exit(0)
+
+    def _prompt_for_order_details(self) -> Dict[str, Optional[str]]:
+        """
+        Interactively prompt user for order details step-by-step.
+
+        Returns:
+            Dictionary with symbol, side, order_type, quantity, and price
+        """
+        self._print_section_header("ORDER ENTRY")
+
+        # Prompt for symbol
+        symbol = self._prompt_for_input(
+            "Enter Symbol (e.g., BTCUSDT): ",
+            validate_fn=lambda x: self._validate_and_normalize_symbol(x)
+        )
+
+        # Prompt for side
+        side = self._prompt_for_choice(
+            "Select Order Side:",
+            ["BUY", "SELL"]
+        )
+
+        # Prompt for order type
+        order_type = self._prompt_for_choice(
+            "Select Order Type:",
+            ["MARKET", "LIMIT"]
+        )
+
+        # Prompt for quantity
+        quantity = self._prompt_for_input(
+            "Enter Quantity: ",
+            validate_fn=lambda x: self._validate_numeric_input(x, "Quantity")
+        )
+
+        # Prompt for price (only if LIMIT order)
+        price = None
+        if order_type.upper() == "LIMIT":
+            price = self._prompt_for_input(
+                "Enter Price: ",
+                validate_fn=lambda x: self._validate_numeric_input(x, "Price")
+            )
+
+        return {
+            'symbol': symbol,
+            'side': side,
+            'order_type': order_type,
+            'quantity': quantity,
+            'price': price
+        }
+
+    def _prompt_for_input(
+        self,
+        prompt: str,
+        validate_fn=None
+    ) -> str:
+        """
+        Prompt user for input with optional validation.
+
+        Args:
+            prompt: Display prompt message
+            validate_fn: Optional validation function that raises ValueError on invalid input
+
+        Returns:
+            User input after validation
+        """
+        while True:
+            try:
+                user_input = input(prompt).strip()
+                if not user_input:
+                    print("❌ Input cannot be empty. Please try again.")
+                    continue
+
+                if validate_fn:
+                    return validate_fn(user_input)
+                return user_input
+
+            except ValueError as e:
+                print(f"❌ {str(e)} Please try again.")
+                continue
+
+    def _prompt_for_choice(self, prompt: str, options: list) -> str:
+        """
+        Prompt user to select from a list of options.
+
+        Args:
+            prompt: Display prompt message
+            options: List of available options
+
+        Returns:
+            Selected option
+        """
+        print(f"\n{prompt}")
+        for idx, option in enumerate(options, 1):
+            print(f"  {idx}. {option}")
+
+        while True:
+            try:
+                choice = input("Enter choice (number): ").strip()
+                choice_idx = int(choice) - 1
+
+                if 0 <= choice_idx < len(options):
+                    return options[choice_idx]
+                else:
+                    print(
+                        f"❌ Invalid choice. Please enter a number between 1 and {len(options)}.")
+                    continue
+            except ValueError:
+                print(f"❌ Please enter a valid number.")
+                continue
+
+    def _validate_and_normalize_symbol(self, symbol: str) -> str:
+        """
+        Validate and normalize symbol format.
+
+        Args:
+            symbol: User input for symbol
+
+        Raises:
+            ValueError: If symbol format is invalid
+
+        Returns:
+            Normalized symbol
+        """
+        symbol_upper = symbol.upper().strip()
+        if not symbol_upper.endswith("USDT"):
+            raise ValueError(
+                f"Symbol must end with 'USDT' (e.g., BTCUSDT). Got: {symbol}")
+
+        if not symbol_upper[:-4].isalpha():
+            raise ValueError(
+                f"Symbol format invalid: {symbol}")
+
+        return symbol_upper
+
+    def _validate_numeric_input(self, value: str, field_name: str) -> str:
+        """
+        Validate numeric input.
+
+        Args:
+            value: User input
+            field_name: Name of field being validated (for error message)
+
+        Raises:
+            ValueError: If input is not a valid positive number
+
+        Returns:
+            Validated numeric string
+        """
+        try:
+            num = float(value)
+            if num <= 0:
+                raise ValueError(
+                    f"{field_name} must be positive, got: {num}")
+            return str(num)
+        except ValueError as e:
+            if "positive" in str(e):
+                raise
+            raise ValueError(
+                f"{field_name} must be numeric, got: '{value}'")
+
+    def _display_order_summary(self, order_params: Dict[str, Optional[str]]) -> None:
+        """
+        Display formatted order summary for user review.
+
+        Args:
+            order_params: Dictionary with order parameters
+        """
+        self._print_section_header("ORDER SUMMARY")
+
+        print(f"Symbol:       {order_params['symbol']}")
+        print(f"Side:         {order_params['side']}")
+        print(f"Type:         {order_params['order_type']}")
+        print(f"Quantity:     {order_params['quantity']}")
+
+        if order_params['order_type'].upper() == "LIMIT":
+            print(f"Price:        {order_params['price']}")
+        else:
+            print(f"Price:        Market Price")
+
+        self._print_section_footer()
+
+    def _confirm_order_execution(self) -> bool:
+        """
+        Ask user to confirm order execution.
+
+        Returns:
+            True if user confirms, False otherwise
+        """
+        while True:
+            confirmation = input(
+                "Confirm order execution? (y/n): ").strip().lower()
+            if confirmation in ['y', 'yes']:
+                return True
+            elif confirmation in ['n', 'no']:
+                return False
+            else:
+                print("❌ Please enter 'y' or 'n'.")
+
+    def _print_section_header(self, title: str) -> None:
+        """
+        Print a formatted section header.
+
+        Args:
+            title: Section title
+        """
+        print("\n" + "=" * 60)
+        print(f"{title:^60}")
+        print("=" * 60)
+
+    def _print_section_footer(self) -> None:
+        """Print a formatted section footer."""
+        print("=" * 60 + "\n")
 
 
 def main():

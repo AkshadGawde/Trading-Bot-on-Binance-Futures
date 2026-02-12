@@ -135,3 +135,11 @@ This project was built as a technical assignment to demonstrate:
 - Modular Python application design
 - Input validation and safe execution
 - Logging and error handling practices
+
+
+### Interactive Order Mode (Bonus Feature)
+
+## Start guided order placement with prompts:
+```bash
+python -m trading_bot place-order --interactive
+```
